@@ -123,4 +123,24 @@ describe Resque do
       expect { Resque.async { Resque.enqueue(BadPerformer, 5) } }.to raise_error
     end
   end
+
+  context "after unmock!" do
+    around(:each) do |example|
+      Resque.unmock!
+      example.run
+      Resque.mock!
+    end
+
+    it ".enqueue will attempt to connect ro redis" do
+      expect { Resque.enqueue(BadPerformer) }.to raise_error Redis::CannotConnectError
+    end
+
+    it ".enqueue_in is undefined" do
+      Resque.respond_to?(:enqueue_in).should be_false
+    end
+
+    it ".async is undefined" do
+      Resque.respond_to?(:async).should be_false
+    end
+  end
 end

@@ -2,85 +2,102 @@ require 'resque'
 
 module Resque
   def self.mock!
-    extend MockExt
+    @old_enqueue = method(:enqueue)
+    @old_sleep = method(:sleep)
+    define_method(:sleep) { |seconds| Kernel.sleep seconds }
+    define_method(:async) { |&block| MockExt.async(&block) }
+    define_method(:enqueue) { |klass, *args| MockExt.enqueue(klass, *args) }
+    define_method(:enqueue_in) { |delay, klass, *args| MockExt.enqueue_in(delay, klass, *args) }
+  end
+
+  def self.unmock!
+    raise "It's not mocked!" if @old_enqueue.nil? || @old_sleep.nil?
+    define_method(:sleep, &@old_sleep)
+    @old_sleep = nil
+    define_method(:enqueue, &@old_enqueue)
+    @old_enqueue = nil
+    remove_method :async
+    remove_method :enqueue_in
   end
 
   module MockExt
-    def async
-      @async = true
-      create_worker_manager
-      yield
-    ensure
-      wait_for_worker_manager
-      @async = false
-    end
-
-    def enqueue(klass, *args)
-      puts "Mock enqueue: async=#{!!@async}, stack_depth=#{caller.size}, #{klass}, #{args.inspect}" if ENV['VERBOSE']
-      defer(klass, args)
-    end
-
-    def enqueue_in(delay, klass, *args)
-      puts "Mock enqueue in #{delay}: async=#{!!@async}, stack_depth=#{caller.size}, #{klass}, #{args.inspect}" if ENV['VERBOSE']
-      defer(klass, args, delay)
-    end
-
-    def defer(klass, args, delay = nil)
-      validate(klass)
-
-      if @async
-        add_job('payload' => { 'class' => klass, 'args' => args }, 'delay' => delay)
-      else
-        sleep delay if delay
-        klass.perform(*roundtrip(args))
+    class << self
+      def async
+        @async = true
+        create_worker_manager
+        yield
+      ensure
+        wait_for_worker_manager
+        @async = false
       end
-    end
 
-    def create_worker_manager
-      @worker_manager = Thread.new do
-        Thread.current.abort_on_exception = true
-        worker_threads = []
+      def enqueue(klass, *args)
+        puts "Mock enqueue: async=#{!!@async}, stack_depth=#{caller.size}, #{klass}, #{args.inspect}" if ENV['VERBOSE']
+        defer(klass, args, nil)
+      end
 
-        while true
-          break if Thread.current[:exit] && worker_threads.empty? && Thread.current[:jobs].empty?
+      def enqueue_in(delay, klass, *args)
+        puts "Mock enqueue in #{delay}: async=#{!!@async}, stack_depth=#{caller.size}, #{klass}, #{args.inspect}" if ENV['VERBOSE']
+        defer(klass, args, delay)
+      end
 
-          worker_threads.reject! {|t| !t.alive? }
+      def defer(klass, args, delay)
+        Resque.validate(klass)
 
-          while Thread.current[:jobs] && job_data = Thread.current[:jobs].shift
-            worker_threads << create_worker_thread_for(job_data)
+        if @async
+          add_job('payload' => { 'class' => klass, 'args' => args }, 'delay' => delay)
+        else
+          Resque.sleep delay if delay
+          klass.perform(*roundtrip(args))
+        end
+      end
+
+      def create_worker_manager
+        @worker_manager = Thread.new do
+          Thread.current.abort_on_exception = true
+          worker_threads = []
+
+          while true
+            break if Thread.current[:exit] && worker_threads.empty? && Thread.current[:jobs].empty?
+
+            worker_threads.reject! {|t| !t.alive? }
+
+            while Thread.current[:jobs] && job_data = Thread.current[:jobs].shift
+              worker_threads << create_worker_thread_for(job_data)
+            end
+
+            Resque.sleep 0.5
+          end
+        end.tap {|t| t[:jobs] = [] }
+      end
+
+      def wait_for_worker_manager
+        @worker_manager[:exit] = true
+        @worker_manager.join
+        @worker_manager = nil
+      end
+
+      def create_worker_thread_for(data)
+        Thread.new(data) do |data|
+          Thread.current.abort_on_exception = true
+          if delay = data['delay']
+            Resque.sleep delay
           end
 
-          sleep 0.5
+          klass = data['payload']['class']
+          puts "Mock perform: #{klass}.perform(*#{data['payload']['args'].inspect})" if ENV['VERBOSE']
+            klass.perform(*roundtrip(data['payload']['args']))
+            puts "Mock exit: #{klass}.perform(*#{data['payload']['args'].inspect})" if ENV['VERBOSE']
         end
-      end.tap {|t| t[:jobs] = [] }
-    end
-
-    def wait_for_worker_manager
-      @worker_manager[:exit] = true
-      @worker_manager.join
-      @worker_manager = nil
-    end
-
-    def create_worker_thread_for(data)
-      Thread.new(data) do |data|
-        Thread.current.abort_on_exception = true
-        if delay = data['delay']
-          sleep delay
-        end
-
-        klass = data['payload']['class']
-        puts "Mock perform: #{klass}.perform(*#{data['payload']['args'].inspect})" if ENV['VERBOSE']
-        klass.perform(*roundtrip(data['payload']['args']))
-        puts "Mock exit: #{klass}.perform(*#{data['payload']['args'].inspect})" if ENV['VERBOSE']
       end
-    end
 
-    def roundtrip(args)
-      decode(encode(args))
-    end
+      def roundtrip(args)
+        Resque.decode(Resque.encode(args))
+      end
 
-    def add_job(data)
-      @worker_manager[:jobs] << data
+      def add_job(data)
+        @worker_manager[:jobs] << data
+      end
     end
   end
 end
