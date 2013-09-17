@@ -1,4 +1,15 @@
 require 'resque'
+require 'resque_scheduler'
+
+module ResqueScheduler
+  def self.foo(m)
+    remove_method m.name
+  end
+
+  def self.unfoo(m)
+    define_method(m.name, m)
+  end
+end
 
 module Resque
   def self.mock!
@@ -7,17 +18,29 @@ module Resque
     define_method(:sleep) { |seconds| Kernel.sleep seconds }
     define_method(:async) { |&block| MockExt.async(&block) }
     define_method(:enqueue) { |klass, *args| MockExt.enqueue(klass, *args) }
-    define_method(:enqueue_in) { |delay, klass, *args| MockExt.enqueue_in(delay, klass, *args) }
+
+    if methods.include?(:enqueue_in)
+      @old_enqueue_in = method(:enqueue_in)
+      ResqueScheduler.foo @old_enqueue_in
+      define_method(:enqueue_in) { |delay, klass, *args| MockExt.enqueue_in(delay, klass, *args) }
+    end
   end
 
   def self.unmock!
     raise "It's not mocked!" if @old_enqueue.nil? || @old_sleep.nil?
+
+    remove_method :sleep
     define_method(:sleep, &@old_sleep)
     @old_sleep = nil
+
+    remove_method :enqueue
     define_method(:enqueue, &@old_enqueue)
     @old_enqueue = nil
+
+    remove_method :enqueue_in rescue puts "couldn't remove :enqueue_in"
+    ResqueScheduler.unfoo @old_enqueue_in
+
     remove_method :async
-    remove_method :enqueue_in
   end
 
   module MockExt

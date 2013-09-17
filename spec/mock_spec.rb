@@ -135,8 +135,8 @@ describe Resque do
       expect { Resque.enqueue(BadPerformer) }.to raise_error Redis::CannotConnectError
     end
 
-    it ".enqueue_in is undefined" do
-      Resque.respond_to?(:enqueue_in).should be_false
+    it ".enqueue_in will attempt to connect ro redis" do
+      expect { Resque.enqueue_in(1, BadPerformer) }.to raise_error Redis::CannotConnectError
     end
 
     it ".async is undefined" do
